@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { fetchPeers, nameIndex } from "../catalog";
-import { clean, count, limited, table, time, usd } from "../format";
+import { clean, compactJson, count, limited, table, time, usd } from "../format";
 import { defineTool, readOnly } from "./tool";
 
 type Totals = { requests?: number; failedRequests?: number; spent?: string; inputTokens?: number; cachedInputTokens?: number; outputTokens?: number };
@@ -105,5 +105,40 @@ export const recent_requests = defineTool({
         r.errorCode || r.errorMessage ? `${clean(r.errorCode, 30)} ${clean(r.errorMessage, 120)}`.trim() : "",
       ]),
     );
+  },
+});
+
+type RequestDetail = Request & {
+  finishedAt?: number | null;
+  workspaceId?: string;
+  endUser?: string | null;
+  firstTokenMs?: number | null;
+  tokensPerSecond?: number | null;
+  costPending?: boolean;
+  routeSelection?: unknown;
+};
+
+export const request = defineTool({
+  name: "request",
+  title: "Один запрос",
+  description:
+    "Один запрос из журнала по тегу (GET /requests/:tag): ключ, модель, продавец, статус, задержка, первый токен, скорость, цена, токены, ошибка " +
+    "и routeSelection — почему автоматическая маршрутизация выбрала этого продавца. Тела запроса и ответа не выводятся.",
+  inputSchema: { tag: z.string().regex(/^gw_[A-Za-z0-9-]+$/, "тег вида gw_…").describe("Тег запроса (gw_…) из recent_requests") },
+  annotations: readOnly("Один запрос"),
+  async run(args, { client }) {
+    const r = await client.get<RequestDetail>(`/requests/${encodeURIComponent(args.tag)}`);
+    const names = r.sellerPeerId ? nameIndex(await fetchPeers(client)) : new Map<string, string>();
+    const seller = r.sellerPeerId ? `${clean(names.get(r.sellerPeerId.toLowerCase()), 40) || "?"} ${r.sellerPeerId}` : "—";
+    const price = r.costPending ? "ещё считается" : usd(r.spent);
+    return [
+      `Запрос ${clean(r.tag, 60)}: ${clean(r.method, 8)} ${clean(r.path, 60)}, модель ${clean(r.model, 60) || "—"}, статус ${r.status ?? (r.finishedAt ? "—" : "в процессе")}`,
+      `Время: ${time(r.startedAt)} → ${time(r.finishedAt)}; задержка ${r.latencyMs ?? "—"} мс, первый токен ${r.firstTokenMs ?? "—"} мс, ${r.tokensPerSecond ?? "—"} ток/с`,
+      `Ключ ${clean(r.keyLabel, 40) || "—"}, воркспейс ${clean(r.workspaceId, 40) || "—"}${r.endUser ? `, endUser ${clean(r.endUser, 60)}` : ""}`,
+      `Продавец: ${seller}`,
+      `Цена ${price}; токены вход/кэш/выход ${tokens(r)}`,
+      ...(r.errorCode || r.errorMessage ? [`Ошибка: ${clean(r.errorCode, 40)} ${clean(r.errorMessage, 400)}`.trim()] : []),
+      `routeSelection: ${r.routeSelection == null ? "нет (продавец задан явно или данных нет)" : compactJson(r.routeSelection, 2000)}`,
+    ].join("\n");
   },
 });

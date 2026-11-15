@@ -84,11 +84,66 @@ claude mcp add antseed -s user \
 }
 ```
 
+## Установка в OpenCode
+
+Быстрее всего — командой. `--global` подключает сервер во всех проектах; без него запись попадает
+в конфиг текущего проекта:
+
+```sh
+opencode mcp add antseed --global \
+  --env ANTSEED_URL=https://your-gateway.example.com \
+  --env ANTSEED_ADMIN_TOKEN_FILE=$HOME/.config/opencode/mcp-secrets/antseed \
+  -- npx -y @inteko/antseed-mcp
+```
+
+Или вручную в `~/.config/opencode/opencode.json` (глобально) либо `opencode.json` в корне проекта.
+Серверы лежат в `mcp.servers`, переменные окружения — в `environment`:
+
+```jsonc
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "servers": {
+      "antseed": {
+        "type": "local",
+        "command": ["npx", "-y", "@inteko/antseed-mcp"],
+        "environment": {
+          "ANTSEED_URL": "https://your-gateway.example.com",
+          "ANTSEED_ADMIN_TOKEN_FILE": "/Users/you/.config/opencode/mcp-secrets/antseed",
+          "ANTSEED_ALLOW_WRITES": "false"
+        }
+      }
+    }
+  }
+}
+```
+
+Токен лучше держать в отдельном файле с правами `600`, а не в конфиге:
+
+```sh
+mkdir -p ~/.config/opencode/mcp-secrets
+printf '%s' 'antseed_admin_your_token' > ~/.config/opencode/mcp-secrets/antseed
+chmod 600 ~/.config/opencode/mcp-secrets/antseed
+```
+
+Вместо `ANTSEED_ADMIN_TOKEN_FILE` можно передать сам токен через подстановку OpenCode:
+`"ANTSEED_ADMIN_TOKEN": "{file:/Users/you/.config/opencode/mcp-secrets/antseed}"` или
+`"{env:ANTSEED_ADMIN_TOKEN}"`. Запись `$VAR` в JSON не раскрывается.
+
+Чтобы запустить локальную копию из исходников вместо пакета npm, укажите
+`"command": ["bun", "/путь/к/antseed-mcp/src/index.ts"]`.
+
+Проверка: `opencode mcp list` должен показать `✓ antseed connected`; внутри OpenCode — `/mcps`.
+Инструменты называются `antseed_<tool>` (например, `antseed_wallet`), а в режиме Code Mode
+(по умолчанию) вызываются как `tools.antseed.wallet(...)`. Чтобы отдать их модели напрямую,
+без Code Mode, добавьте серверу `"codemode": false`.
+Подробнее — [документация OpenCode по MCP](https://opencode.ai/docs/mcp-servers/).
+
 ## Включение записи
 
 По умолчанию сервер только читает: инструмента изменения политики в списке нет вовсе.
 Чтобы агент мог менять список разрешённых продавцов, поставьте `"ANTSEED_ALLOW_WRITES": "true"`
-(в Claude Code — `-e ANTSEED_ALLOW_WRITES=true`) и перезапустите клиент.
+(в Claude Code — `-e ANTSEED_ALLOW_WRITES=true`, в OpenCode — `--env ANTSEED_ALLOW_WRITES=true`) и перезапустите клиент.
 
 Даже тогда `routing_allow_peers` по умолчанию делает пробный прогон и показывает diff; записывает
 только с `dryRun: false`. Он меняет одно поле `allowedPeerIds`, остальную политику сохраняет как есть
@@ -105,8 +160,13 @@ claude mcp add antseed -s user \
 | `peer` | Один продавец: trust и его разбор, верификация, аудиты моделей, сервисы с ценами и health |
 | `search_models` | Модели сети: число продавцов и диапазон цен |
 | `routing` | Текущая политика маршрутизации с именами разрешённых продавцов |
+| `route_preview` | Кого выберет маршрутизация для модели: кандидаты по рангу и причины отсева |
 | `usage` | Расход с группировкой: `hour`, `day`, `model`, `key`, `member`, `peer`, `workspace`, `user` |
 | `recent_requests` | Последние запросы; `failedOnly` — только ошибки |
+| `request` | Один запрос по тегу: продавец, задержка, цена, токены, `routeSelection` (без тел запроса и ответа) |
+| `wallet` | Баланс воркспейса: доступно, в каналах, не зачислено, лимит, статус депозита |
+| `channels` | Платёжные каналы с продавцами: резерв, потрачено, settled, остаток |
+| `runway` | На сколько дней хватит баланса при среднем расходе за N дней |
 | `routing_allow_peers` | Добавить или убрать продавцов из `allowedPeerIds` (только с `ANTSEED_ALLOW_WRITES=true`) |
 
 ID моделей сравниваются с нормализацией: `grok-4.7`, `grok-4-7` и `xai/grok-4.7` — одна модель.
@@ -133,7 +193,7 @@ bun run build       # dist/index.js для npm
 bunx @modelcontextprotocol/inspector bun src/index.ts   # ручная проверка
 ```
 
-Устройство кода и правила проекта — в [CLAUDE.md](CLAUDE.md).
+Устройство кода и правила проекта — в [AGENTS.md](AGENTS.md).
 
 ## Безопасность
 

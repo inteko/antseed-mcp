@@ -7,7 +7,9 @@ import { createClient, type Fetch } from "../src/client";
 import type { Config } from "../src/config";
 import { createServer, READ_TOOLS, WRITE_TOOLS } from "../src/server";
 import { model_sellers, modelSellers } from "../src/tools/sellers";
-import { routing_allow_peers } from "../src/tools/routing";
+import { route_preview, routing_allow_peers } from "../src/tools/routing";
+import { request } from "../src/tools/usage";
+import { channels, runway, wallet } from "../src/tools/wallet";
 import { callTool, type Context } from "../src/tools/tool";
 
 const peers: Peer[] = await Bun.file(new URL("../fixtures/peers.json", import.meta.url)).json();
@@ -49,6 +51,28 @@ function gateway(override?: (call: Call) => Response | undefined) {
     if (call.path === "/routing" && call.method === "PUT") return json((policy = call.body as Record<string, unknown>));
     if (call.path === "/routing") return json(policy);
     if (call.path === "/status") return json({ version: "0.1.248", buyer: { reachable: true, peers: 9, dhtNodes: 10 } });
+    if (call.path === "/workspaces") return json([{ id: "ws_default", name: "Default", isDefault: true }, { id: "ws_other", name: "Other" }]);
+    if (call.path === "/workspaces/ws_default/wallet")
+      return json({ address: "0xabc", available: "70", reserved: "3", walletUsdc: "0.000000", creditLimit: "500", operator: null, deposit: { mode: "background", status: "credited", event: { phase: "credited", amount: "46.26", txHash: "0xfed", at: 1 } } });
+    if (call.path === "/workspaces/ws_default/channels")
+      return json([
+        { channelId: "0x1", peerId: APEX, sellerName: "Apex Ant", status: "active", reserved: "31", spent: "30", settled: "29.5", openedAt: 1 },
+        { channelId: "0x2", peerId: SUPER, sellerName: "Super", status: "active", reserved: "1", spent: "0", settled: "0", openedAt: 2 },
+        { channelId: "0x3", peerId: GESUND, sellerName: "Gesund", status: "closed", reserved: "5", spent: "5", settled: "5", openedAt: 3 },
+      ]);
+    if (call.path.startsWith("/route-preview"))
+      return json({
+        model: "gpt-6-luna",
+        modelAllowed: true,
+        sources: [{ level: "buyer", id: null, policy: { maxOutputUsdPerMillion: 4 } }, { level: "gateway", id: null, policy: null }],
+        candidates: [
+          { peerId: SUPER, displayName: "Super", rank: 2, eligible: true, reasons: ["success ~95%"], inputUsdPerMillion: 0.1, outputUsdPerMillion: 0.6, trustScore: 50 },
+          { peerId: APEX, displayName: "Apex Ant", rank: 1, eligible: true, reasons: ["success ~100%"], inputUsdPerMillion: 0.09, outputUsdPerMillion: 0.3, trustScore: 83 },
+          { peerId: GESUND, displayName: "Gesund", rank: null, eligible: false, reasons: ["buyer config: output price $9 over cap $4"], inputUsdPerMillion: 2, outputUsdPerMillion: 9, trustScore: 10 },
+        ],
+      });
+    if (call.path === "/requests/gw_1")
+      return json({ tag: "gw_1", startedAt: 1, finishedAt: 2, keyLabel: "k", method: "POST", path: "/v1/messages", model: "gpt-6-luna", status: 200, sellerPeerId: APEX, spent: "0.01", costPending: false, requestBody: "SECRET_BODY", responseBody: "SECRET_REPLY", routeSelection: { ordering: "expected-cost" } });
     if (call.path.startsWith("/usage")) return json({ from: 0, to: 1, totals: { requests: 1, spent: "0.5" }, groups: [{ group: APEX, label: APEX, requests: 1, spent: "0.5" }] });
     if (call.path.startsWith("/requests"))
       return json({ requests: [{ tag: "gw_1", startedAt: 1, path: "/v1/chat/completions", model: "gpt-6-luna", status: 502, sellerPeerId: APEX, errorCode: "peer_error" }], nextBefore: null });
@@ -139,6 +163,77 @@ describe("routing_allow_peers", () => {
   });
 });
 
+describe("wallet, channels, runway", () => {
+  test("wallet shows the default workspace balance", async () => {
+    const fake = gateway();
+    const out = text(await callTool(wallet, {}, contextWith(fake)));
+    expect(out).toContain("Default (ws_default)");
+    expect(out).toContain("| Доступно | $70 |");
+    expect(out).toContain("не задан");
+    expect(fake.calls.map((c) => c.path)).toContain("/workspaces/ws_default/wallet");
+  });
+
+  test("an unknown workspace is an error that lists the known ones", async () => {
+    const result = await callTool(wallet, { workspace: "ws_nope" }, contextWith(gateway()));
+    expect(result.isError).toBe(true);
+    expect(text(result)).toContain("ws_default, ws_other");
+  });
+
+  test("a workspace ID cannot inject a path", async () => {
+    const result = await callTool(wallet, { workspace: "../keys" }, contextWith(gateway()));
+    expect(result.isError).toBe(true);
+  });
+
+  test("channels: active only by default, sorted by reserve, with totals", async () => {
+    const out = text(await callTool(channels, {}, contextWith(gateway())));
+    expect(out).toContain("каналов 2, зарезервировано $32, потрачено $30");
+    expect(out).toContain("остаток резерва $2");
+    expect(out.indexOf("Apex Ant")).toBeLessThan(out.indexOf("Super"));
+    expect(out).not.toContain("Gesund");
+    expect(text(await callTool(channels, { activeOnly: false }, contextWith(gateway())))).toContain("Gesund");
+  });
+
+  test("runway divides the balance by the average daily spend", async () => {
+    const fake = gateway((call) =>
+      call.path.startsWith("/usage") ? new Response(JSON.stringify({ totals: { requests: 10, spent: "70" } }), { status: 200 }) : undefined,
+    );
+    const out = text(await callTool(runway, { days: 7 }, contextWith(fake)));
+    expect(out).toContain("в среднем $10 в день");
+    expect(out).toContain("Хватит на 7.0 дн.");
+    expect(out).toContain("на 7.2 дн.");
+    const usageCall = fake.calls.find((c) => c.path.startsWith("/usage"))!;
+    expect(new URL(`https://x${usageCall.path}`).searchParams.get("workspace")).toBe("ws_default");
+  });
+
+  test("runway without spend does not forecast", async () => {
+    const fake = gateway((call) => (call.path.startsWith("/usage") ? new Response(JSON.stringify({ totals: { spent: "0" } }), { status: 200 }) : undefined));
+    expect(text(await callTool(runway, {}, contextWith(fake)))).toContain("прогноз не считается");
+  });
+});
+
+describe("route_preview and request", () => {
+  test("route_preview orders eligible sellers by rank and hides the rest by default", async () => {
+    const out = text(await callTool(route_preview, { model: "gpt-6-luna" }, contextWith(gateway())));
+    expect(out).toContain("подходят 2 из 3");
+    expect(out.indexOf("Apex Ant")).toBeLessThan(out.indexOf("Super"));
+    expect(out).toContain("Отсеяно 1");
+    expect(out).not.toContain("over cap");
+    expect(text(await callTool(route_preview, { model: "gpt-6-luna", showIneligible: true }, contextWith(gateway())))).toContain("over cap $4");
+  });
+
+  test("request shows the seller and routeSelection but never the bodies", async () => {
+    const out = text(await callTool(request, { tag: "gw_1" }, contextWith(gateway())));
+    expect(out).toContain(`Apex Ant ${APEX}`);
+    expect(out).toContain("expected-cost");
+    expect(out).not.toContain("SECRET_BODY");
+    expect(out).not.toContain("SECRET_REPLY");
+  });
+
+  test("request rejects a tag that is not gw_…", async () => {
+    expect((await callTool(request, { tag: "../keys" }, contextWith(gateway()))).isError).toBe(true);
+  });
+});
+
 describe("errors and the token", () => {
   test("API errors become isError results", async () => {
     const fake = gateway((call) => (call.path === "/peers" ? new Response(JSON.stringify({ error: { code: "forbidden", message: "Token lacks scope" } }), { status: 403 }) : undefined));
@@ -163,6 +258,8 @@ describe("errors and the token", () => {
       usage: { groupBy: "peer" },
       recent_requests: { failedOnly: true },
       routing_allow_peers: { add: [GESUND] },
+      route_preview: { model: "gpt-6-luna" },
+      request: { tag: "gw_1" },
     };
     const outputs: string[] = [];
     for (const echo of [false, true]) {
@@ -172,7 +269,7 @@ describe("errors and the token", () => {
       for (const tool of [...READ_TOOLS, ...WRITE_TOOLS]) outputs.push(text(await callTool(tool, args[tool.name] ?? {}, context)));
       expect(fake.calls.every((call) => call.auth === `Bearer ${TOKEN}`)).toBe(true);
     }
-    expect(outputs.length).toBe(18);
+    expect(outputs.length).toBe(2 * (READ_TOOLS.length + WRITE_TOOLS.length));
     for (const output of outputs) expect(output).not.toContain("TESTSECRET");
     expect(outputs.at(-1)).toContain("<redacted>");
   });
