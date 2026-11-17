@@ -4,7 +4,7 @@ import { clean, limited, table, usd } from "../format";
 import { defineTool, readOnly } from "./tool";
 
 const range = (value: { min?: number; max?: number } | undefined) => {
-  if (value?.min === undefined && value?.max === undefined) return "—";
+  if (value?.min === undefined && value?.max === undefined) return "";
   return value.min === value.max ? usd(value.min) : `${usd(value.min)}–${usd(value.max)}`;
 };
 
@@ -31,22 +31,20 @@ export function searchModels(models: Model[], query: string, type?: string): Mod
 
 export const search_models = defineTool({
   name: "search_models",
-  title: "Поиск моделей",
-  description:
-    "Поиск моделей сети AntSeed по части ID, алиаса или названия (с нормализацией: grok47 найдёт grok-4.7 и grok-4-7). " +
-    "Для каждой: тип, число продавцов (и верифицированных), диапазон цен входа и выхода за 1M токенов. Подробности по продавцам — model_sellers.",
+  title: "Find models",
+  description: "Search network models by ID, alias or name part (matched loosely). Shows type, seller count and price range; use model_sellers for sellers.",
   inputSchema: {
-    query: z.string().min(1).describe("Часть ID, алиаса или названия модели"),
-    type: z.enum(["text", "image", "video", "speech", "decision"]).optional().describe("Тип модели"),
+    query: z.string().min(1).describe("ID, alias or name part"),
+    type: z.enum(["text", "image", "video", "speech", "decision"]).optional(),
     limit: z.number().int().positive().max(200).default(20),
   },
-  annotations: readOnly("Поиск моделей"),
+  annotations: readOnly("Find models"),
   async run(args, { client }) {
     const found = searchModels(await fetchModels(client), args.query, args.type);
-    if (!found.length) return `Модели по «${clean(args.query)}» не найдены.`;
+    if (!found.length) return `No models match "${clean(args.query)}".`;
     const { shown, more } = limited(found, args.limit);
-    return `Найдено моделей: ${found.length}\n\n${table(
-      ["id", "алиасы", "тип", "продавцов (вериф.)", "вход $/1M", "выход $/1M"],
+    return `found ${found.length}; prices $/1M\n\n${table(
+      ["id", "aliases", "type", "sellers (verified)", "in", "out"],
       shown.map((model) => [
         clean(model.id, 80),
         (model.aliases ?? []).slice(0, 4).map((alias) => clean(alias, 40)).join(", "),

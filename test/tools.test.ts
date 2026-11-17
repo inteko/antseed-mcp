@@ -6,7 +6,7 @@ import { normalizeModelId, resolveModel, type Model, type Peer } from "../src/ca
 import { createClient, type Fetch } from "../src/client";
 import type { Config } from "../src/config";
 import { createServer, READ_TOOLS, WRITE_TOOLS } from "../src/server";
-import { model_sellers, modelSellers } from "../src/tools/sellers";
+import { model_sellers, modelSellers, peer } from "../src/tools/sellers";
 import { route_preview, routing_allow_peers } from "../src/tools/routing";
 import { request } from "../src/tools/usage";
 import { channels, runway, wallet } from "../src/tools/wallet";
@@ -115,13 +115,22 @@ describe("model_sellers", () => {
   test("tool output lists sellers with the % of official column", async () => {
     const result = await callTool(model_sellers, { model: "gpt-6-luna", officialInput: 0.1, officialOutput: 0.5 }, contextWith(gateway()));
     expect(result.isError).toBeUndefined();
-    expect(text(result)).toContain("% офиц.");
-    expect(text(result)).toContain(`| Apex Ant | ${APEX} |`);
+    expect(text(result)).toContain("%official in/out");
+    expect(text(result)).toContain(`Apex Ant\t${APEX}\t`);
   });
 
   test("one official price without the other is an error", async () => {
     const result = await callTool(model_sellers, { model: "gpt-6-luna", officialInput: 0.1 }, contextWith(gateway()));
     expect(result.isError).toBe(true);
+  });
+});
+
+describe("peer", () => {
+  test("audit URLs only with links: true", async () => {
+    const short = text(await callTool(peer, { peer: "Apex" }, contextWith(gateway())));
+    expect(short).toContain("audits same (12): claude-fable-5.1, ");
+    expect(short).not.toContain("https://antscan.co");
+    expect(text(await callTool(peer, { peer: "Apex", links: true }, contextWith(gateway())))).toContain("https://antscan.co/verification-service/");
   });
 });
 
@@ -168,8 +177,8 @@ describe("wallet, channels, runway", () => {
     const fake = gateway();
     const out = text(await callTool(wallet, {}, contextWith(fake)));
     expect(out).toContain("Default (ws_default)");
-    expect(out).toContain("| Доступно | $70 |");
-    expect(out).toContain("не задан");
+    expect(out).toContain("available 70,");
+    expect(out).toContain("not set");
     expect(fake.calls.map((c) => c.path)).toContain("/workspaces/ws_default/wallet");
   });
 
@@ -186,8 +195,8 @@ describe("wallet, channels, runway", () => {
 
   test("channels: active only by default, sorted by reserve, with totals", async () => {
     const out = text(await callTool(channels, {}, contextWith(gateway())));
-    expect(out).toContain("каналов 2, зарезервировано $32, потрачено $30");
-    expect(out).toContain("остаток резерва $2");
+    expect(out).toContain("channels 2; USDC reserved 32, spent 30");
+    expect(out).toContain("left 2");
     expect(out.indexOf("Apex Ant")).toBeLessThan(out.indexOf("Super"));
     expect(out).not.toContain("Gesund");
     expect(text(await callTool(channels, { activeOnly: false }, contextWith(gateway())))).toContain("Gesund");
@@ -198,25 +207,25 @@ describe("wallet, channels, runway", () => {
       call.path.startsWith("/usage") ? new Response(JSON.stringify({ totals: { requests: 10, spent: "70" } }), { status: 200 }) : undefined,
     );
     const out = text(await callTool(runway, { days: 7 }, contextWith(fake)));
-    expect(out).toContain("в среднем $10 в день");
-    expect(out).toContain("Хватит на 7.0 дн.");
-    expect(out).toContain("на 7.2 дн.");
+    expect(out).toContain("10/day");
+    expect(out).toContain("lasts 7.0d");
+    expect(out).toContain("reserve 7.2d");
     const usageCall = fake.calls.find((c) => c.path.startsWith("/usage"))!;
     expect(new URL(`https://x${usageCall.path}`).searchParams.get("workspace")).toBe("ws_default");
   });
 
   test("runway without spend does not forecast", async () => {
     const fake = gateway((call) => (call.path.startsWith("/usage") ? new Response(JSON.stringify({ totals: { spent: "0" } }), { status: 200 }) : undefined));
-    expect(text(await callTool(runway, {}, contextWith(fake)))).toContain("прогноз не считается");
+    expect(text(await callTool(runway, {}, contextWith(fake)))).toContain("no forecast");
   });
 });
 
 describe("route_preview and request", () => {
   test("route_preview orders eligible sellers by rank and hides the rest by default", async () => {
     const out = text(await callTool(route_preview, { model: "gpt-6-luna" }, contextWith(gateway())));
-    expect(out).toContain("подходят 2 из 3");
+    expect(out).toContain("eligible 2 of 3");
     expect(out.indexOf("Apex Ant")).toBeLessThan(out.indexOf("Super"));
-    expect(out).toContain("Отсеяно 1");
+    expect(out).toContain("rejected 1");
     expect(out).not.toContain("over cap");
     expect(text(await callTool(route_preview, { model: "gpt-6-luna", showIneligible: true }, contextWith(gateway())))).toContain("over cap $4");
   });

@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { fetchPeers, nameIndex } from "../catalog";
-import { clean, compactJson, count, limited, table, time, usd } from "../format";
+import { clean, compactJson, count, fields, limited, table, time, usd } from "../format";
 import { defineTool, readOnly } from "./tool";
 
 type Totals = { requests?: number; failedRequests?: number; spent?: string; inputTokens?: number; cachedInputTokens?: number; outputTokens?: number };
@@ -25,21 +25,21 @@ type Request = {
 
 const GROUPS = ["hour", "day", "model", "key", "member", "peer", "workspace", "user"] as const;
 const when = z.union([z.number().int().nonnegative(), z.string().min(1)]).optional();
-const tokens = (t: Pick<Totals, "inputTokens" | "cachedInputTokens" | "outputTokens">) => `${count(t.inputTokens)} / ${count(t.cachedInputTokens)} / ${count(t.outputTokens)}`;
+/** `in/cached/out` token counts, empty when none is known. */
+const tokens = (t: Pick<Totals, "inputTokens" | "cachedInputTokens" | "outputTokens">) =>
+  t.inputTokens == null && t.cachedInputTokens == null && t.outputTokens == null ? "" : `${count(t.inputTokens)}/${count(t.cachedInputTokens)}/${count(t.outputTokens)}`;
 
 export const usage = defineTool({
   name: "usage",
-  title: "Расход",
-  description:
-    "Расход gateway (GET /usage) с группировкой: hour, day, model, key, member, peer, workspace, user. " +
-    "from/to — epoch ms или ISO-дата (по умолчанию последние 30 дней). Для peer рядом с ID показывается имя продавца.",
+  title: "Usage",
+  description: "Gateway spend grouped by hour, day, model, key, member, peer, workspace or user. from/to: epoch ms or ISO date (default: last 30 days).",
   inputSchema: {
-    groupBy: z.enum(GROUPS).describe("Группировка"),
-    from: when.describe("Начало: epoch ms или ISO-дата"),
-    to: when.describe("Конец: epoch ms или ISO-дата"),
+    groupBy: z.enum(GROUPS),
+    from: when.describe("epoch ms or ISO date"),
+    to: when.describe("epoch ms or ISO date"),
     limit: z.number().int().positive().max(500).default(30),
   },
-  annotations: readOnly("Расход"),
+  annotations: readOnly("Usage"),
   async run(args, { client }) {
     const [data, peers] = await Promise.all([
       client.get<Usage>("/usage", { groupBy: args.groupBy, from: args.from, to: args.to }),
@@ -50,10 +50,15 @@ export const usage = defineTool({
     const groups = [...(data.groups ?? [])].sort((a, b) => Number(b.spent ?? 0) - Number(a.spent ?? 0));
     const { shown, more } = limited(groups, args.limit);
     return [
-      `Период ${time(data.from)} — ${time(data.to)}: запросов ${t.requests ?? 0} (ошибок ${t.failedRequests ?? 0}), потрачено ${usd(t.spent)}, токены вход/кэш/выход ${tokens(t)}`,
+      `${time(data.from)} to ${time(data.to)}: ${fields([
+        ["requests", t.requests ?? 0],
+        ["failed", t.failedRequests ?? 0],
+        ["spent", t.spent == null ? "" : `$${usd(t.spent)}`],
+        ["tokens in/cached/out", tokens(t)],
+      ])}`,
       "",
       table(
-        [args.groupBy, "запросов", "ошибок", "потрачено", "вход/кэш/выход"],
+        [args.groupBy, "requests", "failed", "spent $", "tokens in/cached/out"],
         shown.map((g) => {
           const name = args.groupBy === "peer" ? names.get((g.group ?? "").toLowerCase()) : undefined;
           return [`${clean(g.label ?? g.group, 80)}${name ? ` (${clean(name, 40)})` : ""}`, String(g.requests ?? 0), String(g.failedRequests ?? 0), usd(g.spent), tokens(g)];
@@ -69,15 +74,13 @@ const failed = (r: Request) => (r.status ?? 0) >= 400 || Boolean(r.errorCode);
 
 export const recent_requests = defineTool({
   name: "recent_requests",
-  title: "Журнал запросов",
-  description:
-    "Последние запросы через gateway (GET /requests), новые сверху: ключ, путь, модель, статус, продавец, задержка, цена, токены, ошибка. " +
-    "failedOnly оставляет только ошибки (просматривает до 1000 последних запросов).",
+  title: "Request log",
+  description: "Latest gateway requests, newest first: key, path, model, status, seller, latency, cost, tokens, error. failedOnly keeps errors (scans up to 1000 requests).",
   inputSchema: {
     limit: z.number().int().positive().max(200).default(20),
     failedOnly: z.boolean().default(false),
   },
-  annotations: readOnly("Журнал запросов"),
+  annotations: readOnly("Request log"),
   async run(args, { client }) {
     const found: Request[] = [];
     let before: string | undefined;
@@ -88,18 +91,18 @@ export const recent_requests = defineTool({
       if (found.length >= args.limit || !before) break;
     }
     const rows = found.slice(0, args.limit);
-    if (!rows.length) return args.failedOnly ? "Ошибочных запросов среди последних не найдено." : "Журнал пуст.";
+    if (!rows.length) return args.failedOnly ? "No failed requests among the latest." : "Request log is empty.";
     const names = rows.some((r) => r.sellerPeerId) ? nameIndex(await fetchPeers(client)) : new Map<string, string>();
     return table(
-      ["время", "ключ", "запрос", "модель", "статус", "продавец", "мс", "цена", "вход/кэш/выход", "ошибка"],
+      ["time", "key", "request", "model", "status", "seller", "ms", "cost $", "tokens in/cached/out", "error"],
       rows.map((r) => [
         time(r.startedAt),
         clean(r.keyLabel, 30),
-        `${clean(r.method, 8)} ${clean(r.path, 40)}`,
-        clean(r.model, 40) || "—",
-        String(r.status ?? "—"),
-        r.sellerPeerId ? `${clean(names.get(r.sellerPeerId.toLowerCase()), 30) || "?"} ${r.sellerPeerId}` : "—",
-        String(r.latencyMs ?? "—"),
+        `${clean(r.method, 8)} ${clean(r.path, 40)}`.trim(),
+        clean(r.model, 40),
+        String(r.status ?? ""),
+        r.sellerPeerId ? `${clean(names.get(r.sellerPeerId.toLowerCase()), 30) || "?"} ${r.sellerPeerId}` : "",
+        String(r.latencyMs ?? ""),
         usd(r.spent),
         tokens(r),
         r.errorCode || r.errorMessage ? `${clean(r.errorCode, 30)} ${clean(r.errorMessage, 120)}`.trim() : "",
@@ -120,25 +123,41 @@ type RequestDetail = Request & {
 
 export const request = defineTool({
   name: "request",
-  title: "Один запрос",
-  description:
-    "Один запрос из журнала по тегу (GET /requests/:tag): ключ, модель, продавец, статус, задержка, первый токен, скорость, цена, токены, ошибка " +
-    "и routeSelection — почему автоматическая маршрутизация выбрала этого продавца. Тела запроса и ответа не выводятся.",
-  inputSchema: { tag: z.string().regex(/^gw_[A-Za-z0-9-]+$/, "тег вида gw_…").describe("Тег запроса (gw_…) из recent_requests") },
-  annotations: readOnly("Один запрос"),
+  title: "Request",
+  description: "One logged request by tag: timings, seller, cost, tokens, error and routeSelection (why routing picked the seller). Bodies are never shown.",
+  inputSchema: { tag: z.string().regex(/^gw_[A-Za-z0-9-]+$/, "tag like gw_…").describe("Tag (gw_…) from recent_requests") },
+  annotations: readOnly("Request"),
   async run(args, { client }) {
     const r = await client.get<RequestDetail>(`/requests/${encodeURIComponent(args.tag)}`);
     const names = r.sellerPeerId ? nameIndex(await fetchPeers(client)) : new Map<string, string>();
-    const seller = r.sellerPeerId ? `${clean(names.get(r.sellerPeerId.toLowerCase()), 40) || "?"} ${r.sellerPeerId}` : "—";
-    const price = r.costPending ? "ещё считается" : usd(r.spent);
+    const seller = r.sellerPeerId ? `${clean(names.get(r.sellerPeerId.toLowerCase()), 40) || "?"} ${r.sellerPeerId}` : "";
     return [
-      `Запрос ${clean(r.tag, 60)}: ${clean(r.method, 8)} ${clean(r.path, 60)}, модель ${clean(r.model, 60) || "—"}, статус ${r.status ?? (r.finishedAt ? "—" : "в процессе")}`,
-      `Время: ${time(r.startedAt)} → ${time(r.finishedAt)}; задержка ${r.latencyMs ?? "—"} мс, первый токен ${r.firstTokenMs ?? "—"} мс, ${r.tokensPerSecond ?? "—"} ток/с`,
-      `Ключ ${clean(r.keyLabel, 40) || "—"}, воркспейс ${clean(r.workspaceId, 40) || "—"}${r.endUser ? `, endUser ${clean(r.endUser, 60)}` : ""}`,
-      `Продавец: ${seller}`,
-      `Цена ${price}; токены вход/кэш/выход ${tokens(r)}`,
-      ...(r.errorCode || r.errorMessage ? [`Ошибка: ${clean(r.errorCode, 40)} ${clean(r.errorMessage, 400)}`.trim()] : []),
-      `routeSelection: ${r.routeSelection == null ? "нет (продавец задан явно или данных нет)" : compactJson(r.routeSelection, 2000)}`,
-    ].join("\n");
+      `${clean(r.tag, 60)}: ${fields([
+        ["", `${clean(r.method, 8)} ${clean(r.path, 60)}`.trim()],
+        ["model", clean(r.model, 60)],
+        ["status", r.status ?? (r.finishedAt ? "" : "in progress")],
+      ])}`,
+      fields([
+        ["started", time(r.startedAt)],
+        ["finished", time(r.finishedAt)],
+        ["latency ms", r.latencyMs],
+        ["first token ms", r.firstTokenMs],
+        ["tok/s", r.tokensPerSecond],
+      ]),
+      fields([
+        ["key", clean(r.keyLabel, 40)],
+        ["workspace", clean(r.workspaceId, 40)],
+        ["endUser", clean(r.endUser, 60)],
+      ]),
+      fields([
+        ["seller", seller],
+        ["cost", r.costPending ? "pending" : r.spent == null ? "" : `$${usd(r.spent)}`],
+        ["tokens in/cached/out", tokens(r)],
+      ]),
+      ...(r.errorCode || r.errorMessage ? [`error: ${clean(r.errorCode, 40)} ${clean(r.errorMessage, 400)}`.trim()] : []),
+      `routeSelection: ${r.routeSelection == null ? "none (seller pinned or no data)" : compactJson(r.routeSelection, 2000, 4)}`,
+    ]
+      .filter(Boolean)
+      .join("\n");
   },
 });

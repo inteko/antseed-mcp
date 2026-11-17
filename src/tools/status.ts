@@ -1,4 +1,4 @@
-import { clean } from "../format";
+import { clean, fields } from "../format";
 import { defineTool, readOnly } from "./tool";
 
 type Status = {
@@ -11,17 +11,26 @@ type Status = {
 
 export const status = defineTool({
   name: "status",
-  title: "Состояние AntSeed Gateway",
-  description: "Состояние нашего AntSeed Gateway: версия, доступность покупателя (buyer), число видимых продавцов и DHT-узлов, режим доступа.",
+  title: "Gateway status",
+  description: "Gateway version, buyer reachability, visible sellers and DHT nodes, exposure mode.",
   inputSchema: {},
-  annotations: readOnly("Состояние AntSeed Gateway"),
+  annotations: readOnly("Gateway status"),
   async run(_args, { client, config }) {
     const s = await client.get<Status>("/status");
-    const uptimeH = typeof s.buyer?.uptimeMs === "number" ? `${(s.buyer.uptimeMs / 3_600_000).toFixed(1)} ч` : "—";
     return [
-      `Gateway ${config.url}: версия ${clean(s.version) || "—"}, publicUrl ${clean(s.publicUrl, 120) || "—"}`,
-      `Покупатель: ${s.buyer?.reachable ? "доступен" : "НЕДОСТУПЕН"}, продавцов ${s.buyer?.peers ?? "—"}, DHT-узлов ${s.buyer?.dhtNodes ?? "—"}, аптайм ${uptimeH}`,
-      `Доступ: ${clean(s.exposure?.mode) || "—"}${s.exposure?.reachableFromInternet ? " (из интернета)" : ""}; spendFeed ${clean(s.spendFeed) || "—"}`,
-    ].join("\n");
+      `gateway ${config.url}: ${fields([["version", clean(s.version)], ["publicUrl", clean(s.publicUrl, 120)]])}`,
+      `buyer: ${fields([
+        ["", s.buyer?.reachable ? "reachable" : "UNREACHABLE"],
+        ["peers", s.buyer?.peers],
+        ["DHT nodes", s.buyer?.dhtNodes],
+        ["uptime h", typeof s.buyer?.uptimeMs === "number" ? (s.buyer.uptimeMs / 3_600_000).toFixed(1) : ""],
+      ])}`,
+      fields([
+        ["exposure", clean(s.exposure?.mode) + (s.exposure?.reachableFromInternet ? " (internet)" : "")],
+        ["spendFeed", clean(s.spendFeed)],
+      ]),
+    ]
+      .filter(Boolean)
+      .join("\n");
   },
 });

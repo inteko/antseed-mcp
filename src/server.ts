@@ -14,7 +14,7 @@ export const WRITE_TOOLS: Tool<any>[] = [routing_allow_peers];
 export const toolsFor = (context: Context) => (context.config.allowWrites ? [...READ_TOOLS, ...WRITE_TOOLS] : READ_TOOLS);
 
 export function createServer(context: Context): McpServer {
-  const server = new McpServer({ name: "antseed", version: "0.2.0" });
+  const server = new McpServer({ name: "antseed", version: "0.3.0" });
   for (const tool of toolsFor(context)) {
     server.registerTool(
       tool.name,

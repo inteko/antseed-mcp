@@ -41,13 +41,13 @@ export async function callTool<S extends z.ZodRawShape>(tool: Tool<S>, args: unk
   const parsed = z.object(tool.inputSchema).safeParse(args ?? {});
   if (!parsed.success) {
     const issues = parsed.error.issues.map((issue) => `${issue.path.join(".") || "args"}: ${issue.message}`).join("; ");
-    return reply(`Неверные аргументы ${tool.name}: ${issues}`, true);
+    return reply(`Invalid ${tool.name} arguments: ${issues}`, true);
   }
   try {
     return reply(await tool.run(parsed.data as z.infer<z.ZodObject<S>>, context));
   } catch (error) {
-    if (error instanceof ApiError) return reply(`Ошибка AntSeed API: ${clean(error.message, 500)}`, true);
+    if (error instanceof ApiError) return reply(`AntSeed API error: ${clean(error.message, 500)}`, true);
     if (error instanceof ToolError) return reply(error.message, true);
-    return reply(`Внутренняя ошибка ${tool.name}: ${clean((error as Error)?.message ?? error, 500)}`, true);
+    return reply(`Internal ${tool.name} error: ${clean((error as Error)?.message ?? error, 500)}`, true);
   }
 }
